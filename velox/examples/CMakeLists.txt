@@ -49,3 +49,21 @@ target_link_libraries(
   velox_exec_test_lib
   velox_hive_connector
   velox_memory)
+
+add_executable(taxi_benchmark TaxiBenchmark.cpp)
+
+target_link_libraries(
+  taxi_benchmark
+  velox_type
+  velox_vector
+  velox_exec
+  velox_exec_test_lib
+  velox_hive_connector
+  velox_memory
+  velox_dwio_common
+  velox_dwio_parquet_reader
+  velox_dwio_native_parquet_reader
+  velox_dwio_parquet_thrift
+  arrow
+  thrift
+)
