@@ -8,8 +8,10 @@
 #include "velox/dwio/dwrf/reader/DwrfReader.h"
 #include "velox/dwio/parquet/RegisterParquetReader.h"
 #include "velox/dwio/parquet/reader/ParquetReader.h"
+#include "velox/exec/Aggregate.h"
 #include "velox/exec/Task.h"
 #include "velox/exec/tests/utils/PlanBuilder.h"
+#include "velox/functions/prestosql/aggregates/RegisterAggregateFunctions.h"
 #include "velox/vector/BaseVector.h"
 
 using namespace facebook::velox;
@@ -54,11 +56,15 @@ int main(int argc, char** argv) {
   std::cout << "Read " << *reader->numberOfRows() << " rows." << std::endl;
   auto inputRowType = reader->rowType();
 
+  // register aggregates
+  aggregate::prestosql::registerAllAggregateFunctions();
+
+  // Q1
   core::PlanNodeId scanNodeId;
   auto readPlanFragment = exec::test::PlanBuilder()
                               .tableScan(inputRowType)
                               .capturePlanNodeId(scanNodeId)
-                              .topN({"trip_id"}, 5, /*isPartial=*/false)
+                              .partialAggregation({"cab_type"}, {"count(1)"})
                               .planFragment();
 
   auto readTask = std::make_shared<exec::Task>(

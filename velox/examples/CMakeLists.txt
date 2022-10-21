@@ -60,6 +60,7 @@ target_link_libraries(
   velox_exec_test_lib
   velox_hive_connector
   velox_memory
+  velox_aggregates
   velox_dwio_common
   velox_dwio_parquet_reader
   velox_dwio_native_parquet_reader
