@@ -67,4 +67,6 @@ target_link_libraries(
   velox_dwio_parquet_thrift
   arrow
   thrift
+  ${FOLLY_WITH_DEPENDENCIES}
+  ${FOLLY_BENCHMARK}
 )
