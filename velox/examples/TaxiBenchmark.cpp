@@ -19,6 +19,15 @@
 using namespace facebook::velox;
 using namespace facebook::velox::dwio::common;
 
+static void waitForFinishedDrivers(
+    const std::shared_ptr<exec::Task>& task,
+    uint32_t n) {
+  while (task->numFinishedDrivers() < n) {
+    /* sleep override */
+    usleep(100'000); // 0.1 second.
+  }
+}
+
 class TaxiBenchmark {
  public:
   void initialize() {
@@ -37,14 +46,17 @@ class TaxiBenchmark {
     connector::registerConnector(hiveConnector);
   }
 
-  void readFiles(const std::string& filePath) {
-    this->filePath = filePath; // TODO
+  void readFiles(const std::string& directoryPath) {
+    auto localFs = filesystems::getFileSystem("file:", nullptr);
+    this->filesList = localFs->list(directoryPath);
+    CHECK_GE(filesList.size(), size_t(1));
+
+    // read the first file to get schema
     ReaderOptions readerOpts;
-    // To make ParquetReader reads ORC file, setFileFormat to FileFormat::ORC
     readerOpts.setFileFormat(FileFormat::PARQUET);
     auto reader_factory = parquet::ParquetReaderFactory();
     auto reader = reader_factory.createReader(
-        std::make_unique<FileInputStream>(filePath), readerOpts);
+        std::make_unique<FileInputStream>(filesList[0]), readerOpts);
     if (!reader->numberOfRows()) {
       throw std::runtime_error("Failed to read parquet file.");
     }
@@ -52,38 +64,90 @@ class TaxiBenchmark {
     inputRowType = reader->rowType();
   }
 
+  void runQuery(
+      const std::string& queryName,
+      core::PlanFragment& planFragment,
+      core::PlanNodeId& scanNodeId) {
+    auto queryTask = std::make_shared<exec::Task>(
+        queryName,
+        planFragment,
+        /*destination=*/0,
+        core::QueryCtx::createForTest());
+    uint32_t num_threads = 112;
+    // queryTask->start(queryTask, num_threads, 1);
+
+    for (const auto& filePath : filesList) {
+      auto connectorSplit =
+          std::make_shared<connector::hive::HiveConnectorSplit>(
+              kHiveConnectorId,
+              "file:" + filePath,
+              dwio::common::FileFormat::PARQUET);
+      queryTask->addSplit(scanNodeId, exec::Split{connectorSplit});
+    }
+
+    queryTask->noMoreSplits(scanNodeId);
+    // waitForFinishedDrivers(queryTask, num_threads);
+    // spin until completion
+    while (auto result = queryTask->next()) {
+      LOG(INFO) << "Vector available after processing (scan + sort):";
+      for (vector_size_t i = 0; i < result->size(); ++i) {
+        LOG(INFO) << result->toString(i);
+      }
+    }
+  }
+
   // We need a connector id string to identify the connector.
   facebook::velox::RowTypePtr inputRowType;
-  std::string filePath;
+  std::vector<std::string> filesList;
   const std::string kHiveConnectorId = "test-hive";
 };
 
 TaxiBenchmark benchmark;
 
+void warmup() {
+  core::PlanNodeId scanNodeId;
+  auto queryPlanFragment = exec::test::PlanBuilder()
+                               .tableScan(benchmark.inputRowType)
+                               .capturePlanNodeId(scanNodeId)
+                               .partialAggregation({"cab_type"}, {"count(1)"})
+                               .planFragment();
+
+  benchmark.runQuery("Q1_warmup", queryPlanFragment, scanNodeId);
+}
+
+#if 0
+BENCHMARK(TableScan) {
+  core::PlanNodeId scanNodeId;
+  auto queryPlanFragment = exec::test::PlanBuilder()
+                               .tableScan(benchmark.inputRowType)
+                               .capturePlanNodeId(scanNodeId)
+                               .planFragment();
+
+  benchmark.runQuery("TableScan", queryPlanFragment, scanNodeId);
+}
+#endif
+
 BENCHMARK(Q1) {
   core::PlanNodeId scanNodeId;
-  auto readPlanFragment = exec::test::PlanBuilder()
-                              .tableScan(benchmark.inputRowType)
-                              .capturePlanNodeId(scanNodeId)
-                              .partialAggregation({"cab_type"}, {"count(1)"})
-                              .planFragment();
+  auto queryPlanFragment = exec::test::PlanBuilder()
+                               .tableScan(benchmark.inputRowType)
+                               .capturePlanNodeId(scanNodeId)
+                               .partialAggregation({"cab_type"}, {"count(1)"})
+                               .planFragment();
 
-  auto readTask = std::make_shared<exec::Task>(
-      "my_read_task",
-      readPlanFragment,
-      /*destination=*/0,
-      core::QueryCtx::createForTest());
+  benchmark.runQuery("Q1", queryPlanFragment, scanNodeId);
+}
 
-  auto connectorSplit = std::make_shared<connector::hive::HiveConnectorSplit>(
-      benchmark.kHiveConnectorId,
-      "file:" + benchmark.filePath,
-      dwio::common::FileFormat::PARQUET);
-  readTask->addSplit(scanNodeId, exec::Split{connectorSplit});
-  readTask->noMoreSplits(scanNodeId);
+BENCHMARK(Q2) {
+  core::PlanNodeId scanNodeId;
+  auto queryPlanFragment =
+      exec::test::PlanBuilder()
+          .tableScan(benchmark.inputRowType)
+          .capturePlanNodeId(scanNodeId)
+          .partialAggregation({"passenger_count"}, {"avg(total_amount)"})
+          .planFragment();
 
-  // spin until completion
-  while (auto result = readTask->next()) {
-  }
+  benchmark.runQuery("Q2", queryPlanFragment, scanNodeId);
 }
 
 // read in the taxi data and run the benchmark queries
@@ -100,7 +164,19 @@ int main(int argc, char** argv) {
   std::string filePath{argv[1]};
   benchmark.readFiles(filePath);
 
+#if 1
+  // warmup();
   folly::runBenchmarks();
+#else
+  core::PlanNodeId scanNodeId;
+  auto queryPlanFragment = exec::test::PlanBuilder()
+                               .tableScan(benchmark.inputRowType)
+                               .capturePlanNodeId(scanNodeId)
+                               .partialAggregation({"cab_type"}, {"count(1)"})
+                               .planFragment();
+
+  benchmark.runQuery("Q1", queryPlanFragment, scanNodeId);
+#endif
 
 #if 0
   while (auto result = readTask->next()) {
