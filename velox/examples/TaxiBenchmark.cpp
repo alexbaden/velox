@@ -12,6 +12,7 @@
 #include "velox/dwio/parquet/reader/ParquetReader.h"
 #include "velox/exec/Aggregate.h"
 #include "velox/exec/Task.h"
+#include "velox/exec/tests/utils/Cursor.h"
 #include "velox/exec/tests/utils/PlanBuilder.h"
 #include "velox/functions/prestosql/aggregates/RegisterAggregateFunctions.h"
 #include "velox/vector/BaseVector.h"
@@ -68,13 +69,16 @@ class TaxiBenchmark {
       const std::string& queryName,
       core::PlanFragment& planFragment,
       core::PlanNodeId& scanNodeId) {
-    auto queryTask = std::make_shared<exec::Task>(
-        queryName,
-        planFragment,
-        /*destination=*/0,
-        core::QueryCtx::createForTest());
     uint32_t num_threads = 112;
-    // queryTask->start(queryTask, num_threads, 1);
+    exec::test::CursorParameters params;
+    params.planNode = planFragment.planNode;
+    params.maxDrivers = num_threads;
+    params.numSplitGroups = 1; // filesList.size();
+    params.numConcurrentSplitGroups = 1;
+
+    auto cursor = std::make_unique<exec::test::TaskCursor>(params);
+    auto queryTask = cursor->task();
+    cursor->start();
 
     for (const auto& filePath : filesList) {
       auto connectorSplit =
@@ -88,8 +92,9 @@ class TaxiBenchmark {
     queryTask->noMoreSplits(scanNodeId);
     // waitForFinishedDrivers(queryTask, num_threads);
     // spin until completion
-    while (auto result = queryTask->next()) {
+    while (cursor->moveNext()) {
       LOG(INFO) << "Vector available after processing (scan + sort):";
+      auto result = cursor->current();
       for (vector_size_t i = 0; i < result->size(); ++i) {
         LOG(INFO) << result->toString(i);
       }
@@ -104,18 +109,6 @@ class TaxiBenchmark {
 
 TaxiBenchmark benchmark;
 
-void warmup() {
-  core::PlanNodeId scanNodeId;
-  auto queryPlanFragment = exec::test::PlanBuilder()
-                               .tableScan(benchmark.inputRowType)
-                               .capturePlanNodeId(scanNodeId)
-                               .partialAggregation({"cab_type"}, {"count(1)"})
-                               .planFragment();
-
-  benchmark.runQuery("Q1_warmup", queryPlanFragment, scanNodeId);
-}
-
-#if 0
 BENCHMARK(TableScan) {
   core::PlanNodeId scanNodeId;
   auto queryPlanFragment = exec::test::PlanBuilder()
@@ -125,7 +118,6 @@ BENCHMARK(TableScan) {
 
   benchmark.runQuery("TableScan", queryPlanFragment, scanNodeId);
 }
-#endif
 
 BENCHMARK(Q1) {
   core::PlanNodeId scanNodeId;
@@ -133,6 +125,7 @@ BENCHMARK(Q1) {
                                .tableScan(benchmark.inputRowType)
                                .capturePlanNodeId(scanNodeId)
                                .partialAggregation({"cab_type"}, {"count(1)"})
+                               .finalAggregation()
                                .planFragment();
 
   benchmark.runQuery("Q1", queryPlanFragment, scanNodeId);
@@ -145,6 +138,7 @@ BENCHMARK(Q2) {
           .tableScan(benchmark.inputRowType)
           .capturePlanNodeId(scanNodeId)
           .partialAggregation({"passenger_count"}, {"avg(total_amount)"})
+          .finalAggregation()
           .planFragment();
 
   benchmark.runQuery("Q2", queryPlanFragment, scanNodeId);
@@ -165,7 +159,6 @@ int main(int argc, char** argv) {
   benchmark.readFiles(filePath);
 
 #if 1
-  // warmup();
   folly::runBenchmarks();
 #else
   core::PlanNodeId scanNodeId;
