@@ -11,9 +11,11 @@
 #include "velox/dwio/parquet/RegisterParquetReader.h"
 #include "velox/dwio/parquet/reader/ParquetReader.h"
 #include "velox/exec/Aggregate.h"
+#include "velox/exec/PlanNodeStats.h"
 #include "velox/exec/Task.h"
 #include "velox/exec/tests/utils/Cursor.h"
 #include "velox/exec/tests/utils/PlanBuilder.h"
+#include "velox/exec/tests/utils/QueryAssertions.h"
 #include "velox/functions/prestosql/aggregates/RegisterAggregateFunctions.h"
 #include "velox/functions/prestosql/registration/RegistrationFunctions.h"
 #include "velox/parse/TypeResolver.h"
@@ -73,11 +75,13 @@ class TaxiBenchmark {
       const std::string& queryName,
       core::PlanFragment& planFragment,
       core::PlanNodeId& scanNodeId) {
-    uint32_t num_threads = 1;
+    CHECK(!planFragment.isGroupedExecution());
+
+    uint32_t num_threads = 8;
     exec::test::CursorParameters params;
     params.planNode = planFragment.planNode;
     params.maxDrivers = num_threads;
-    params.numSplitGroups = 1; // filesList.size();
+    params.numSplitGroups = 1;
     params.numConcurrentSplitGroups = 1;
 
     auto cursor = std::make_unique<exec::test::TaskCursor>(params);
@@ -94,7 +98,7 @@ class TaxiBenchmark {
     }
 
     queryTask->noMoreSplits(scanNodeId);
-    // waitForFinishedDrivers(queryTask, num_threads);
+
     // spin until completion
     while (cursor->moveNext()) {
       LOG(INFO) << "Vector available after processing (scan + sort):";
@@ -103,6 +107,24 @@ class TaxiBenchmark {
         LOG(INFO) << result->toString(i);
       }
     }
+
+    CHECK(exec::test::waitForTaskCompletion(queryTask.get()));
+    const auto stats = queryTask->taskStats();
+    std::cout << fmt::format(
+                     "Execution time: {}",
+                     succinctMillis(
+                         stats.executionEndTimeMs - stats.executionStartTimeMs))
+              << std::endl;
+    std::cout << fmt::format(
+                     "Splits total: {}, finished: {}",
+                     stats.numTotalSplits,
+                     stats.numFinishedSplits)
+              << std::endl;
+    std::cout << printPlanWithStats(
+                     *planFragment.planNode,
+                     stats,
+                     /*includeCustomStats=*/true)
+              << std::endl;
   }
 
   // We need a connector id string to identify the connector.
@@ -119,6 +141,7 @@ BENCHMARK(TotalCount) {
                                .tableScan(benchmark.inputRowType)
                                .capturePlanNodeId(scanNodeId)
                                .partialAggregation({}, {"count(1)"})
+                               .localPartition({})
                                .finalAggregation()
                                .planFragment();
 
@@ -131,6 +154,7 @@ BENCHMARK(Q1) {
                                .tableScan(benchmark.inputRowType)
                                .capturePlanNodeId(scanNodeId)
                                .partialAggregation({"cab_type"}, {"count(1)"})
+                               .localPartition({})
                                .finalAggregation()
                                .planFragment();
 
@@ -144,6 +168,7 @@ BENCHMARK(Q2) {
           .tableScan(benchmark.inputRowType)
           .capturePlanNodeId(scanNodeId)
           .partialAggregation({"passenger_count"}, {"avg(total_amount)"})
+          .localPartition({})
           .finalAggregation()
           .planFragment();
 
@@ -158,6 +183,7 @@ BENCHMARK(Q3) {
           .capturePlanNodeId(scanNodeId)
           .project({"passenger_count", "year(pickup_datetime) AS pickup_year"})
           .partialAggregation({"passenger_count", "pickup_year"}, {"count(1)"})
+          .localPartition({})
           .finalAggregation()
           .planFragment();
 
@@ -177,6 +203,7 @@ BENCHMARK(Q4) {
           .partialAggregation(
               {"passenger_count", "pickup_year", "distance"},
               {"count(1) AS the_count"})
+          .localPartition({})
           .finalAggregation()
           .orderBy({"pickup_year", "the_count DESC"}, false)
           .planFragment();
@@ -206,19 +233,11 @@ int main(int argc, char** argv) {
                                .tableScan(benchmark.inputRowType)
                                .capturePlanNodeId(scanNodeId)
                                .partialAggregation({"cab_type"}, {"count(1)"})
+                               .localPartition({})
+                               .finalAggregation()
                                .planFragment();
 
   benchmark.runQuery("Q1", queryPlanFragment, scanNodeId);
 #endif
-
-#if 0
-  while (auto result = readTask->next()) {
-    LOG(INFO) << "Vector available after processing (scan + sort):";
-    for (vector_size_t i = 0; i < result->size(); ++i) {
-      LOG(INFO) << result->toString(i);
-    }
-  }
-#endif
-
   return 0;
 }
