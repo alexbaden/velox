@@ -15,6 +15,8 @@
 #include "velox/exec/tests/utils/Cursor.h"
 #include "velox/exec/tests/utils/PlanBuilder.h"
 #include "velox/functions/prestosql/aggregates/RegisterAggregateFunctions.h"
+#include "velox/functions/prestosql/registration/RegistrationFunctions.h"
+#include "velox/parse/TypeResolver.h"
 #include "velox/vector/BaseVector.h"
 
 using namespace facebook::velox;
@@ -32,7 +34,9 @@ static void waitForFinishedDrivers(
 class TaxiBenchmark {
  public:
   void initialize() {
+    functions::prestosql::registerAllScalarFunctions();
     aggregate::prestosql::registerAllAggregateFunctions();
+    parse::registerTypeResolver();
     // To be able to read local files, we need to register the local file
     // filesystem. We also need to register the parquet reader factory:
     filesystems::registerLocalFileSystem();
@@ -69,7 +73,7 @@ class TaxiBenchmark {
       const std::string& queryName,
       core::PlanFragment& planFragment,
       core::PlanNodeId& scanNodeId) {
-    uint32_t num_threads = 112;
+    uint32_t num_threads = 1;
     exec::test::CursorParameters params;
     params.planNode = planFragment.planNode;
     params.maxDrivers = num_threads;
@@ -109,14 +113,16 @@ class TaxiBenchmark {
 
 TaxiBenchmark benchmark;
 
-BENCHMARK(TableScan) {
+BENCHMARK(TotalCount) {
   core::PlanNodeId scanNodeId;
   auto queryPlanFragment = exec::test::PlanBuilder()
                                .tableScan(benchmark.inputRowType)
                                .capturePlanNodeId(scanNodeId)
+                               .partialAggregation({}, {"count(1)"})
+                               .finalAggregation()
                                .planFragment();
 
-  benchmark.runQuery("TableScan", queryPlanFragment, scanNodeId);
+  benchmark.runQuery("TotalCount", queryPlanFragment, scanNodeId);
 }
 
 BENCHMARK(Q1) {
@@ -142,6 +148,40 @@ BENCHMARK(Q2) {
           .planFragment();
 
   benchmark.runQuery("Q2", queryPlanFragment, scanNodeId);
+}
+
+BENCHMARK(Q3) {
+  core::PlanNodeId scanNodeId;
+  auto queryPlanFragment =
+      exec::test::PlanBuilder()
+          .tableScan(benchmark.inputRowType)
+          .capturePlanNodeId(scanNodeId)
+          .project({"passenger_count", "year(pickup_datetime) AS pickup_year"})
+          .partialAggregation({"passenger_count", "pickup_year"}, {"count(1)"})
+          .finalAggregation()
+          .planFragment();
+
+  benchmark.runQuery("Q3", queryPlanFragment, scanNodeId);
+}
+
+BENCHMARK(Q4) {
+  core::PlanNodeId scanNodeId;
+  auto queryPlanFragment =
+      exec::test::PlanBuilder()
+          .tableScan(benchmark.inputRowType)
+          .capturePlanNodeId(scanNodeId)
+          .project(
+              {"passenger_count",
+               "year(pickup_datetime) AS pickup_year",
+               "cast(trip_distance as int) AS distance"})
+          .partialAggregation(
+              {"passenger_count", "pickup_year", "distance"},
+              {"count(1) AS the_count"})
+          .finalAggregation()
+          .orderBy({"pickup_year", "the_count DESC"}, false)
+          .planFragment();
+
+  benchmark.runQuery("Q4", queryPlanFragment, scanNodeId);
 }
 
 // read in the taxi data and run the benchmark queries
